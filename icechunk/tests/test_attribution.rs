@@ -369,6 +369,7 @@ async fn read_virtual_chunk(
         offset: 0,
         length: 4,
         checksum: None,
+        prefix: None,
     };
     session
         .set_chunk_ref(array.clone(), coords.clone(), Some(ChunkPayload::Virtual(vref)))

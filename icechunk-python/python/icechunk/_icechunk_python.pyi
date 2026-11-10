@@ -386,6 +386,7 @@ class VirtualChunkSpec:
         length: int,
         etag_checksum: str | None = None,
         last_updated_at_checksum: datetime.datetime | None = None,
+        prefix: bytes | None = None,
     ) -> Self: ...
 
 class CompressionAlgorithm(Enum):

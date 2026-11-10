@@ -381,6 +381,7 @@ async fn assert_traversal_rejected_but_legit_works(
             offset: 0,
             length: legit.len() as u64,
             checksum: None,
+            prefix: None,
         })),
     )
     .await?;
@@ -405,6 +406,7 @@ async fn assert_traversal_rejected_but_legit_works(
             offset: 0,
             length: secret_len,
             checksum: None,
+            prefix: None,
         })),
     )
     .await?;
@@ -489,6 +491,7 @@ async fn test_file_virtual_ref_empty_segment_unsupported_on_read()
             offset: 0,
             length: 4,
             checksum: None,
+            prefix: None,
         })),
     )
     .await?;
@@ -528,6 +531,7 @@ async fn test_file_virtual_ref_empty_segment_rejected_at_write()
         offset: 0,
         length: 4,
         checksum: None,
+        prefix: None,
     };
     // Container validation runs before the ref is stored, so the array need not
     // exist: the unsupported key is what makes this fail.
@@ -580,12 +584,14 @@ async fn test_repository_with_local_virtual_refs(
         offset: 0,
         length: 5,
         checksum: None,
+        prefix: None,
     });
     let payload2 = ChunkPayload::Virtual(VirtualChunkRef {
         location: VirtualChunkLocation::from_url(&format!("file://{}", chunks[1].0,))?,
         offset: 1,
         length: 5,
         checksum: None,
+        prefix: None,
     });
 
     let new_array_path: Path = "/array".try_into().unwrap();
@@ -676,6 +682,7 @@ async fn test_repository_with_minio_virtual_refs(
         offset: 0,
         length: 5,
         checksum: None,
+        prefix: None,
     });
     let payload2 = ChunkPayload::Virtual(VirtualChunkRef {
         location: VirtualChunkLocation::from_url(&format!(
@@ -685,6 +692,7 @@ async fn test_repository_with_minio_virtual_refs(
         offset: 1,
         length: 5,
         checksum: None,
+        prefix: None,
     });
 
     let new_array_path: Path = "/array".try_into().unwrap();
@@ -827,6 +835,7 @@ async fn test_zarr_store_virtual_refs_minio_set_and_get(
         offset: 0,
         length: 5,
         checksum: None,
+        prefix: None,
     };
     let ref2 = VirtualChunkRef {
         location: VirtualChunkLocation::from_url(&format!(
@@ -836,6 +845,7 @@ async fn test_zarr_store_virtual_refs_minio_set_and_get(
         offset: 1,
         length: 5,
         checksum: None,
+        prefix: None,
     };
     store.set_virtual_ref("array/c/0/0/0", ref1, false).await?;
     store.set_virtual_ref("array/c/0/0/1", ref2, false).await?;
@@ -857,6 +867,7 @@ async fn test_zarr_store_virtual_refs_minio_set_and_get(
         offset: 1,
         length: 5,
         checksum: None,
+        prefix: None,
     };
     assert!(matches!(
                 store.set_virtual_ref("array/c/0/0/0", bad_ref, true).await,
@@ -922,6 +933,7 @@ async fn test_zarr_store_virtual_refs_http_non_default_port() -> Result<(), Box<
         offset: 0,
         length: 5,
         checksum: None,
+        prefix: None,
     };
     store.set_virtual_ref("array/c/0/0/0", reference, false).await?;
 
@@ -1018,6 +1030,7 @@ async fn test_zarr_store_virtual_refs_from_public_s3(
         offset: 22306,
         length: 288,
         checksum: None,
+        prefix: None,
     };
 
     store.set_virtual_ref("year/c/0", ref2, false).await?;
@@ -1062,6 +1075,7 @@ async fn test_zarr_store_virtual_refs_from_public_gcs(
         offset: 22306,
         length: 288,
         checksum: None,
+        prefix: None,
     };
 
     let ref2 = VirtualChunkRef {
@@ -1071,6 +1085,7 @@ async fn test_zarr_store_virtual_refs_from_public_gcs(
         offset: 223,
         length: 400,
         checksum: None,
+        prefix: None,
     };
 
     let ref3 = VirtualChunkRef {
@@ -1080,6 +1095,7 @@ async fn test_zarr_store_virtual_refs_from_public_gcs(
         offset: 0,
         length: 100,
         checksum: None,
+        prefix: None,
     };
 
     let ref_expired = VirtualChunkRef {
@@ -1089,6 +1105,7 @@ async fn test_zarr_store_virtual_refs_from_public_gcs(
         offset: 22306,
         length: 288,
         checksum: Some(Checksum::LastModified(SecondsSinceEpoch(3600))),
+        prefix: None,
     };
     let ref_bad_tag = VirtualChunkRef {
         location: VirtualChunkLocation::from_url(
@@ -1097,6 +1114,7 @@ async fn test_zarr_store_virtual_refs_from_public_gcs(
         offset: 22306,
         length: 288,
         checksum: Some(Checksum::ETag(ETag("bad".to_string()))),
+        prefix: None,
     };
 
     store.set_virtual_ref("year/c/0", ref1, false).await?;
@@ -1149,6 +1167,7 @@ async fn test_zarr_store_virtual_refs_from_public_azure(
         offset: 0,
         length: 8,
         checksum: None,
+        prefix: None,
     };
 
     store.set_virtual_ref("magic/c/0", public_ref, false).await?;
@@ -1270,6 +1289,7 @@ async fn test_zarr_store_with_multiple_virtual_chunk_containers(
         offset: 0,
         length: 5,
         checksum: None,
+        prefix: None,
     };
     let ref2 = VirtualChunkRef {
         location: VirtualChunkLocation::from_url(&format!(
@@ -1279,6 +1299,7 @@ async fn test_zarr_store_with_multiple_virtual_chunk_containers(
         offset: 1,
         length: 5,
         checksum: None,
+        prefix: None,
     };
     let ref3 = VirtualChunkRef {
         location: VirtualChunkLocation::from_url(&format!(
@@ -1288,6 +1309,7 @@ async fn test_zarr_store_with_multiple_virtual_chunk_containers(
         offset: 1,
         length: 5,
         checksum: Some(Checksum::LastModified(old_timestamp)),
+        prefix: None,
     };
     store.set_virtual_ref("array/c/0/0/0", ref1, false).await?;
     store.set_virtual_ref("array/c/0/0/1", ref2, false).await?;
@@ -1317,6 +1339,7 @@ async fn test_zarr_store_with_multiple_virtual_chunk_containers(
         offset: 0,
         length: 5,
         checksum: None,
+        prefix: None,
     };
     let ref2 = VirtualChunkRef {
         location: VirtualChunkLocation::from_url(&format!(
@@ -1326,6 +1349,7 @@ async fn test_zarr_store_with_multiple_virtual_chunk_containers(
         offset: 1,
         length: 5,
         checksum: None,
+        prefix: None,
     };
     let ref3 = VirtualChunkRef {
         location: VirtualChunkLocation::from_url(&format!(
@@ -1335,6 +1359,7 @@ async fn test_zarr_store_with_multiple_virtual_chunk_containers(
         offset: 1,
         length: 5,
         checksum: Some(Checksum::ETag(ETag(String::from("invalid etag")))),
+        prefix: None,
     };
 
     store.set_virtual_ref("array/c/0/0/2", ref1, false).await?;
@@ -1349,6 +1374,7 @@ async fn test_zarr_store_with_multiple_virtual_chunk_containers(
         offset: 22306,
         length: 288,
         checksum: None,
+        prefix: None,
     };
     let public_modified_ref = VirtualChunkRef {
         location: VirtualChunkLocation::from_url(
@@ -1357,6 +1383,7 @@ async fn test_zarr_store_with_multiple_virtual_chunk_containers(
         offset: 22306,
         length: 288,
         checksum: Some(Checksum::ETag(ETag(String::from("invalid etag")))),
+        prefix: None,
     };
 
     store.set_virtual_ref("array/c/1/1/1", public_ref, false).await?;
@@ -1500,12 +1527,14 @@ async fn test_virtual_refs_with_vcc_relative_urls(
         offset: 0,
         length: 5,
         checksum: None,
+        prefix: None,
     };
     let ref2 = VirtualChunkRef {
         location: VirtualChunkLocation::from_vcc_path("local-data", "chunk-2")?,
         offset: 1,
         length: 5,
         checksum: None,
+        prefix: None,
     };
 
     // Verify the locations are relative
@@ -1634,6 +1663,7 @@ async fn test_vcc_relative_ref_rejects_file_traversal() -> Result<(), Box<dyn Er
             offset: 0,
             length: secret.len() as u64,
             checksum: None,
+            prefix: None,
         })),
     )
     .await?;

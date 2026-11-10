@@ -1374,6 +1374,44 @@ impl Session {
                 offset,
                 length,
                 checksum,
+                prefix: Some(prefix),
+            })) => {
+                // The chunk is the prefix followed by the referenced bytes. Fetch
+                // the whole reference, then cut the requested range out of the two
+                // together.
+                let total = prefix.len() as u64 + length;
+                let wanted = construct_valid_byte_range(byte_range, 0, total)?;
+                let source = offset..offset + length;
+                let resolver = Arc::clone(&self.virtual_resolver);
+                let array = array_label(path).to_string();
+                let chunk = coords.0.clone();
+                Ok(Some(crate::compat::ic_boxed!(async move {
+                    let referenced = resolver
+                        .fetch_chunk(
+                            location.url(),
+                            &source,
+                            checksum.as_ref(),
+                            RequestAttribution {
+                                labels: resolver.attribution_labels(),
+                                array: Some(&array),
+                                chunk: Some(&chunk),
+                            },
+                        )
+                        .await
+                        .inject()?;
+                    let mut whole =
+                        bytes::BytesMut::with_capacity(prefix.len() + referenced.len());
+                    whole.extend_from_slice(&prefix);
+                    whole.extend_from_slice(&referenced);
+                    Ok(whole.freeze().slice(wanted.start as usize..wanted.end as usize))
+                })))
+            }
+            Some(ChunkPayload::Virtual(VirtualChunkRef {
+                location,
+                offset,
+                length,
+                checksum,
+                prefix: None,
             })) => {
                 let byte_range = construct_valid_byte_range(byte_range, offset, length)?;
                 let resolver = Arc::clone(&self.virtual_resolver);
@@ -6209,6 +6247,7 @@ mod tests {
                 offset: 0,
                 length: 0,
                 checksum: None,
+                prefix: None,
             }),
             ChunkPayload::Ref(ChunkRef {
                 id: crate::format::ChunkId::random(),

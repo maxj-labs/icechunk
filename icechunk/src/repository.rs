@@ -4013,6 +4013,7 @@ mod tests {
                         offset: idx as u64 * 1000,
                         length: 1000,
                         checksum: None,
+                        prefix: None,
                     })),
                 )
                 .await?;

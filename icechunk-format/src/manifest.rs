@@ -446,6 +446,11 @@ pub struct VirtualChunkRef {
     pub offset: ChunkOffset,
     pub length: ChunkLength,
     pub checksum: Option<Checksum>,
+    /// Bytes returned before the referenced bytes when the chunk is read:
+    /// context a codec needs to decode this chunk (NASA-IMPACT/veda-odd#498).
+    /// Stored in `ChunkRef.extra`.
+    #[serde(default)]
+    pub prefix: Option<Bytes>,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -818,6 +823,7 @@ fn ref_to_payload(
         Ok(ChunkPayload::Virtual(VirtualChunkRef {
             location,
             checksum: checksum(&chunk_ref),
+            prefix: chunk_ref.extra().map(|e| Bytes::copy_from_slice(e.bytes())),
             offset: chunk_ref.offset(),
             length: chunk_ref.length(),
         }))
@@ -826,6 +832,7 @@ fn ref_to_payload(
         Ok(ChunkPayload::Virtual(VirtualChunkRef {
             location,
             checksum: checksum(&chunk_ref),
+            prefix: chunk_ref.extra().map(|e| Bytes::copy_from_slice(e.bytes())),
             offset: chunk_ref.offset(),
             length: chunk_ref.length(),
         }))
@@ -1026,10 +1033,15 @@ fn mk_chunk_ref<'bldr>(
                 } else {
                     (Some(builder.create_string(location_str)), None)
                 };
+            let extra = virtual_chunk_ref
+                .prefix
+                .as_ref()
+                .map(|prefix| builder.create_vector(prefix.as_ref()));
             let args = generated::ChunkRefArgs {
                 index,
                 location,
                 compressed_location,
+                extra,
                 offset: virtual_chunk_ref.offset,
                 length: virtual_chunk_ref.length,
                 checksum_etag: match &virtual_chunk_ref.checksum {
@@ -1446,6 +1458,7 @@ mod tests {
                     offset: i as u64 * 1024,
                     length: 1024,
                     checksum: None,
+                    prefix: None,
                 }),
             })
             .collect()
@@ -1525,6 +1538,7 @@ mod tests {
                     offset: i as u64 * 1024,
                     length: 1024,
                     checksum: None,
+                    prefix: None,
                 }),
             })
             .collect();
@@ -1736,6 +1750,7 @@ mod tests {
                     offset: i as u64 * 1024,
                     length: 1024,
                     checksum: None,
+                    prefix: None,
                 }),
             })
             .collect();
@@ -1773,6 +1788,7 @@ mod tests {
                     offset: i as u64 * 1024,
                     length: 1024,
                     checksum: None,
+                    prefix: None,
                 }),
             })
             .collect();
@@ -1819,6 +1835,7 @@ mod tests {
                     offset: i as u64 * 4096,
                     length: 4096,
                     checksum: None,
+                    prefix: None,
                 }),
             })
             .collect();

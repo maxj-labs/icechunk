@@ -442,6 +442,7 @@ pub(crate) async fn set_chunks(
                     offset: 0,
                     length: CHUNK_SIZE_BYTES,
                     checksum: None,
+                    prefix: None,
                 });
                 session
                     .set_chunk_ref(path.clone(), ChunkIndices(vec![idx]), Some(payload))

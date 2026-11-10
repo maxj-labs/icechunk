@@ -254,6 +254,7 @@ impl JsStore {
             offset: offset as u64,
             length: length as u64,
             checksum,
+            prefix: None,
         };
         self.0
             .set_virtual_ref(normalize_key(&key), virtual_ref, validate_container)
@@ -282,6 +283,7 @@ impl JsStore {
                     length: spec.length as u64,
                     location,
                     checksum,
+                    prefix: None,
                 };
                 Ok::<_, napi::Error>((index, vref))
             })

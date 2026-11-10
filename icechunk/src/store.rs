@@ -980,7 +980,10 @@ async fn get_chunk_size(
     let size = chunk_ref
         .map(|payload| match payload {
             ChunkPayload::Inline(bytes) => bytes.len() as u64,
-            ChunkPayload::Virtual(virtual_chunk_ref) => virtual_chunk_ref.length,
+            ChunkPayload::Virtual(virtual_chunk_ref) => {
+                virtual_chunk_ref.length
+                    + virtual_chunk_ref.prefix.as_ref().map_or(0, |p| p.len() as u64)
+            }
             ChunkPayload::Ref(chunk_ref) => chunk_ref.length,
             _ => 0,
         })

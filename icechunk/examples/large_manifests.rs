@@ -101,6 +101,7 @@ async fn write_chunk_refs_batch(session: Arc<RwLock<Session>>, batch: usize) {
             offset: 0,
             length: 1,
             checksum: None,
+            prefix: None,
         });
         session
             .write()
