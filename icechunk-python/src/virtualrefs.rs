@@ -74,6 +74,7 @@ pub(crate) fn build_vrefs_from_arrays(
                 length: lengths[i],
                 checksum: checksum.clone(),
                 prefix: None,
+                more_ranges: None,
             };
             Ok(Some((indices, vref)))
         })

@@ -4014,6 +4014,7 @@ mod tests {
                         length: 1000,
                         checksum: None,
                         prefix: None,
+                        more_ranges: None,
                     })),
                 )
                 .await?;

@@ -1374,36 +1374,60 @@ impl Session {
                 offset,
                 length,
                 checksum,
-                prefix: Some(prefix),
-            })) => {
-                // The chunk is the prefix followed by the referenced bytes. Fetch
-                // the whole reference, then cut the requested range out of the two
-                // together.
-                let total = prefix.len() as u64 + length;
+                prefix,
+                more_ranges,
+            })) if prefix.is_some() || more_ranges.is_some() => {
+                // The chunk is a concatenation: the prefix, then each referenced
+                // range in order. Read only the parts the requested range touches.
+                let prefix = prefix.unwrap_or_default();
+                let mut ranges = vec![(offset, length)];
+                ranges.extend(more_ranges.unwrap_or_default());
+                let total =
+                    prefix.len() as u64 + ranges.iter().map(|(_, l)| *l).sum::<u64>();
                 let wanted = construct_valid_byte_range(byte_range, 0, total)?;
-                let source = offset..offset + length;
                 let resolver = Arc::clone(&self.virtual_resolver);
                 let array = array_label(path).to_string();
                 let chunk = coords.0.clone();
                 Ok(Some(crate::compat::ic_boxed!(async move {
-                    let referenced = resolver
-                        .fetch_chunk(
-                            location.url(),
-                            &source,
-                            checksum.as_ref(),
-                            RequestAttribution {
-                                labels: resolver.attribution_labels(),
-                                array: Some(&array),
-                                chunk: Some(&chunk),
-                            },
-                        )
-                        .await
-                        .inject()?;
-                    let mut whole =
-                        bytes::BytesMut::with_capacity(prefix.len() + referenced.len());
-                    whole.extend_from_slice(&prefix);
-                    whole.extend_from_slice(&referenced);
-                    Ok(whole.freeze().slice(wanted.start as usize..wanted.end as usize))
+                    let mut whole = bytes::BytesMut::with_capacity(
+                        (wanted.end - wanted.start) as usize,
+                    );
+                    let prefix_len = prefix.len() as u64;
+                    if wanted.start < prefix_len {
+                        let stop = wanted.end.min(prefix_len);
+                        whole.extend_from_slice(
+                            &prefix[wanted.start as usize..stop as usize],
+                        );
+                    }
+                    let mut part_start = prefix_len;
+                    for (part_offset, part_length) in ranges {
+                        let part_end = part_start + part_length;
+                        let lo = wanted.start.max(part_start);
+                        let hi = wanted.end.min(part_end);
+                        if lo < hi {
+                            let source = part_offset + (lo - part_start)
+                                ..part_offset + (hi - part_start);
+                            let fetched = resolver
+                                .fetch_chunk(
+                                    location.url(),
+                                    &source,
+                                    checksum.as_ref(),
+                                    RequestAttribution {
+                                        labels: resolver.attribution_labels(),
+                                        array: Some(&array),
+                                        chunk: Some(&chunk),
+                                    },
+                                )
+                                .await
+                                .inject()?;
+                            whole.extend_from_slice(&fetched);
+                        }
+                        part_start = part_end;
+                        if part_start >= wanted.end {
+                            break;
+                        }
+                    }
+                    Ok(whole.freeze())
                 })))
             }
             Some(ChunkPayload::Virtual(VirtualChunkRef {
@@ -1411,7 +1435,7 @@ impl Session {
                 offset,
                 length,
                 checksum,
-                prefix: None,
+                ..
             })) => {
                 let byte_range = construct_valid_byte_range(byte_range, offset, length)?;
                 let resolver = Arc::clone(&self.virtual_resolver);
@@ -6248,6 +6272,7 @@ mod tests {
                 length: 0,
                 checksum: None,
                 prefix: None,
+                more_ranges: None,
             }),
             ChunkPayload::Ref(ChunkRef {
                 id: crate::format::ChunkId::random(),

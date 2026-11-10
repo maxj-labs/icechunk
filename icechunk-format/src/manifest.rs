@@ -451,6 +451,68 @@ pub struct VirtualChunkRef {
     /// Stored in `ChunkRef.extra`.
     #[serde(default)]
     pub prefix: Option<Bytes>,
+    /// Further byte ranges `(offset, length)` of the same object, read in order
+    /// after `(offset, length)`. With `prefix`, they make the chunk a
+    /// concatenation: a literal, then several ranges (a "virtual shard").
+    /// Stored in `ChunkRef.extra`.
+    #[serde(default)]
+    pub more_ranges: Option<Vec<(ChunkOffset, ChunkLength)>>,
+}
+
+/// `ChunkRef.extra` of a virtual reference: a tag byte, the prefix length (u32 LE)
+/// and bytes, then the number of further ranges (u32 LE) and each as two u64 LE.
+const EXTRA_TAG_PARTS: u8 = 1;
+
+fn encode_parts(
+    prefix: Option<&Bytes>,
+    more_ranges: Option<&Vec<(ChunkOffset, ChunkLength)>>,
+) -> Option<Vec<u8>> {
+    if prefix.is_none() && more_ranges.is_none() {
+        return None;
+    }
+    let prefix = prefix.map(|p| p.as_ref()).unwrap_or(&[]);
+    let ranges = more_ranges.map(|r| r.as_slice()).unwrap_or(&[]);
+    let mut out = Vec::with_capacity(9 + prefix.len() + 16 * ranges.len());
+    out.push(EXTRA_TAG_PARTS);
+    out.extend_from_slice(&(prefix.len() as u32).to_le_bytes());
+    out.extend_from_slice(prefix);
+    out.extend_from_slice(&(ranges.len() as u32).to_le_bytes());
+    for (offset, length) in ranges {
+        out.extend_from_slice(&offset.to_le_bytes());
+        out.extend_from_slice(&length.to_le_bytes());
+    }
+    Some(out)
+}
+
+#[allow(clippy::type_complexity)]
+fn decode_parts(
+    extra: Option<&[u8]>,
+) -> (Option<Bytes>, Option<Vec<(ChunkOffset, ChunkLength)>>) {
+    let Some(extra) = extra else { return (None, None) };
+    if extra.len() < 9 || extra[0] != EXTRA_TAG_PARTS {
+        return (None, None);
+    }
+    let u32_at = |i: usize| {
+        extra.get(i..i + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize)
+    };
+    let Some(prefix_len) = u32_at(1) else { return (None, None) };
+    let Some(prefix) = extra.get(5..5 + prefix_len) else { return (None, None) };
+    let Some(n) = u32_at(5 + prefix_len) else { return (None, None) };
+    let mut ranges = Vec::with_capacity(n);
+    let mut at = 9 + prefix_len;
+    for _ in 0..n {
+        let Some(b) = extra.get(at..at + 16) else { return (None, None) };
+        let mut o = [0u8; 8];
+        let mut l = [0u8; 8];
+        o.copy_from_slice(&b[..8]);
+        l.copy_from_slice(&b[8..]);
+        ranges.push((u64::from_le_bytes(o), u64::from_le_bytes(l)));
+        at += 16;
+    }
+    (
+        (prefix_len > 0).then(|| Bytes::copy_from_slice(prefix)),
+        (n > 0).then_some(ranges),
+    )
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -820,19 +882,23 @@ fn ref_to_payload(
             .capture()?
             .to_owned();
         let location = VirtualChunkLocation::from_trusted(location_string);
+        let (prefix, more_ranges) = decode_parts(chunk_ref.extra().map(|e| e.bytes()));
         Ok(ChunkPayload::Virtual(VirtualChunkRef {
             location,
             checksum: checksum(&chunk_ref),
-            prefix: chunk_ref.extra().map(|e| Bytes::copy_from_slice(e.bytes())),
+            prefix,
+            more_ranges,
             offset: chunk_ref.offset(),
             length: chunk_ref.length(),
         }))
     } else if let Some(location) = chunk_ref.location() {
         let location = VirtualChunkLocation::from_trusted(location.to_string());
+        let (prefix, more_ranges) = decode_parts(chunk_ref.extra().map(|e| e.bytes()));
         Ok(ChunkPayload::Virtual(VirtualChunkRef {
             location,
             checksum: checksum(&chunk_ref),
-            prefix: chunk_ref.extra().map(|e| Bytes::copy_from_slice(e.bytes())),
+            prefix,
+            more_ranges,
             offset: chunk_ref.offset(),
             length: chunk_ref.length(),
         }))
@@ -1033,10 +1099,11 @@ fn mk_chunk_ref<'bldr>(
                 } else {
                     (Some(builder.create_string(location_str)), None)
                 };
-            let extra = virtual_chunk_ref
-                .prefix
-                .as_ref()
-                .map(|prefix| builder.create_vector(prefix.as_ref()));
+            let extra = encode_parts(
+                virtual_chunk_ref.prefix.as_ref(),
+                virtual_chunk_ref.more_ranges.as_ref(),
+            )
+            .map(|extra| builder.create_vector(extra.as_slice()));
             let args = generated::ChunkRefArgs {
                 index,
                 location,
@@ -1459,6 +1526,7 @@ mod tests {
                     length: 1024,
                     checksum: None,
                     prefix: None,
+                    more_ranges: None,
                 }),
             })
             .collect()
@@ -1539,6 +1607,7 @@ mod tests {
                     length: 1024,
                     checksum: None,
                     prefix: None,
+                    more_ranges: None,
                 }),
             })
             .collect();
@@ -1751,6 +1820,7 @@ mod tests {
                     length: 1024,
                     checksum: None,
                     prefix: None,
+                    more_ranges: None,
                 }),
             })
             .collect();
@@ -1789,6 +1859,7 @@ mod tests {
                     length: 1024,
                     checksum: None,
                     prefix: None,
+                    more_ranges: None,
                 }),
             })
             .collect();
@@ -1836,6 +1907,7 @@ mod tests {
                     length: 4096,
                     checksum: None,
                     prefix: None,
+                    more_ranges: None,
                 }),
             })
             .collect();

@@ -87,6 +87,8 @@ pub(crate) struct VirtualChunkSpec {
     last_updated_at_checksum: Option<chrono::DateTime<Utc>>,
     #[pyo3(get)]
     prefix: Option<Vec<u8>>,
+    #[pyo3(get)]
+    more_ranges: Option<Vec<(ChunkOffset, ChunkLength)>>,
 }
 
 impl VirtualChunkSpec {
@@ -103,7 +105,7 @@ impl VirtualChunkSpec {
 #[pymethods]
 impl VirtualChunkSpec {
     #[new]
-    #[pyo3(signature = (index, location, offset, length, etag_checksum = None, last_updated_at_checksum = None, prefix = None))]
+    #[pyo3(signature = (index, location, offset, length, etag_checksum = None, last_updated_at_checksum = None, prefix = None, more_ranges = None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         index: Vec<u32>,
@@ -113,6 +115,7 @@ impl VirtualChunkSpec {
         etag_checksum: Option<String>,
         last_updated_at_checksum: Option<chrono::DateTime<Utc>>,
         prefix: Option<Vec<u8>>,
+        more_ranges: Option<Vec<(ChunkOffset, ChunkLength)>>,
     ) -> Self {
         Self {
             index,
@@ -122,6 +125,7 @@ impl VirtualChunkSpec {
             etag_checksum,
             last_updated_at_checksum,
             prefix,
+            more_ranges,
         }
     }
 }
@@ -393,6 +397,7 @@ impl PyStore {
                     length,
                     checksum: checksum.map(|cs| cs.into()),
                     prefix: None,
+                    more_ranges: None,
                 };
                 store
                     .set_virtual_ref(&key, virtual_ref, validate_container)
@@ -424,6 +429,7 @@ impl PyStore {
                 length,
                 checksum: checksum.map(|cs| cs.into()),
                 prefix: None,
+                more_ranges: None,
             };
             store
                 .set_virtual_ref(&key, virtual_ref, validate_container)
@@ -458,6 +464,7 @@ impl PyStore {
                             location,
                             checksum,
                             prefix: vcs.prefix.map(Bytes::from),
+                            more_ranges: vcs.more_ranges,
                         };
                         Ok::<_, PyIcechunkStoreError>((index, vref))
                     })
@@ -511,6 +518,7 @@ impl PyStore {
                             location,
                             checksum,
                             prefix: vcs.prefix.map(Bytes::from),
+                            more_ranges: vcs.more_ranges,
                         };
                         Ok::<_, PyIcechunkStoreError>((index, vref))
                     })

@@ -151,6 +151,7 @@ async fn do_test_repo_chunks_storage(
             length: 100,
             checksum: None,
             prefix: None,
+            more_ranges: None,
         });
         session
             .set_chunk_ref(array_path.clone(), ChunkIndices(vec![idx]), Some(payload))
@@ -302,6 +303,7 @@ async fn test_virtual_chunk_deduplication(
             length: 100,
             checksum: None,
             prefix: None,
+            more_ranges: None,
         });
         session
             .set_chunk_ref(array_path.clone(), ChunkIndices(vec![idx]), Some(payload))
@@ -316,6 +318,7 @@ async fn test_virtual_chunk_deduplication(
             length: 100,
             checksum: None,
             prefix: None,
+            more_ranges: None,
         });
         session
             .set_chunk_ref(array_path.clone(), ChunkIndices(vec![idx]), Some(payload))

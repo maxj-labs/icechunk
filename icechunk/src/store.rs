@@ -983,6 +983,10 @@ async fn get_chunk_size(
             ChunkPayload::Virtual(virtual_chunk_ref) => {
                 virtual_chunk_ref.length
                     + virtual_chunk_ref.prefix.as_ref().map_or(0, |p| p.len() as u64)
+                    + virtual_chunk_ref
+                        .more_ranges
+                        .as_ref()
+                        .map_or(0, |r| r.iter().map(|(_, l)| *l).sum::<u64>())
             }
             ChunkPayload::Ref(chunk_ref) => chunk_ref.length,
             _ => 0,
