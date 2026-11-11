@@ -463,35 +463,37 @@ pub struct VirtualChunkRef {
 /// for the reference's own `location`), its offset and its length.
 pub type VirtualRange = (Option<VirtualChunkLocation>, ChunkOffset, ChunkLength);
 
-/// `ChunkRef.extra` of a virtual reference with a prefix or further ranges:
+/// A virtual reference with a prefix or further ranges is written whole into
+/// `ChunkRef.extra`, and its `location` is left out. A reader that predates
+/// such references then finds a chunk ref that is neither inline, native nor
+/// virtual and fails, instead of returning the first range alone.
 ///
-/// - a tag byte (2);
+/// The bytes are:
+///
+/// - a tag byte (3);
 /// - the prefix: its length (u32 LE) and bytes;
-/// - a table of the other objects the ranges are in: a count (u16 LE), then each
-///   URL as a length (u16 LE) and UTF-8 bytes;
-/// - the further ranges: a count (u32 LE), then each as an index into the table
-///   plus one (u16 LE; 0 is the reference's own location), an offset and a
-///   length (u64 LE each).
-const EXTRA_TAG_PARTS: u8 = 2;
+/// - a table of the objects the ranges are in: a count (u16 LE), then each URL
+///   as a length (u16 LE) and UTF-8 bytes;
+/// - the ranges, first the reference's own: a count (u32 LE), then each as an
+///   index into the table (u16 LE), an offset and a length (u64 LE each).
+const EXTRA_TAG_PARTS: u8 = 3;
 
-pub(crate) fn encode_parts(
-    prefix: Option<&Bytes>,
-    more_ranges: Option<&Vec<VirtualRange>>,
-) -> Option<Vec<u8>> {
-    if prefix.is_none() && more_ranges.is_none() {
+pub(crate) fn encode_parts(reference: &VirtualChunkRef) -> Option<Vec<u8>> {
+    if reference.prefix.is_none() && reference.more_ranges.is_none() {
         return None;
     }
-    let prefix = prefix.map(|p| p.as_ref()).unwrap_or(&[]);
-    let ranges = more_ranges.map(|r| r.as_slice()).unwrap_or(&[]);
-    let mut table: Vec<&str> = Vec::new();
-    for (location, _, _) in ranges {
+    let prefix = reference.prefix.as_ref().map(|p| p.as_ref()).unwrap_or(&[]);
+    let more = reference.more_ranges.as_deref().unwrap_or(&[]);
+    let own = reference.location.url();
+    let mut table: Vec<&str> = vec![own];
+    for (location, _, _) in more {
         if let Some(location) = location
             && !table.contains(&location.url())
         {
             table.push(location.url());
         }
     }
-    let mut out = Vec::with_capacity(11 + prefix.len() + 18 * ranges.len());
+    let mut out = Vec::with_capacity(11 + prefix.len() + own.len() + 18 * (more.len() + 1));
     out.push(EXTRA_TAG_PARTS);
     out.extend_from_slice(&(prefix.len() as u32).to_le_bytes());
     out.extend_from_slice(prefix);
@@ -500,13 +502,13 @@ pub(crate) fn encode_parts(
         out.extend_from_slice(&(url.len() as u16).to_le_bytes());
         out.extend_from_slice(url.as_bytes());
     }
-    out.extend_from_slice(&(ranges.len() as u32).to_le_bytes());
-    for (location, offset, length) in ranges {
+    out.extend_from_slice(&((more.len() + 1) as u32).to_le_bytes());
+    let first = (None, reference.offset, reference.length);
+    for (location, offset, length) in std::iter::once(&first).chain(more.iter()) {
         let index = match location {
             None => 0u16,
             Some(location) => {
                 table.iter().position(|url| *url == location.url()).unwrap_or(0) as u16
-                    + 1
             }
         };
         out.extend_from_slice(&index.to_le_bytes());
@@ -516,44 +518,48 @@ pub(crate) fn encode_parts(
     Some(out)
 }
 
-pub(crate) fn decode_parts(
-    extra: Option<&[u8]>,
-) -> (Option<Bytes>, Option<Vec<VirtualRange>>) {
-    fn parse(extra: &[u8]) -> Option<(Option<Bytes>, Option<Vec<VirtualRange>>)> {
-        let mut at = 0usize;
-        let mut take = |n: usize| -> Option<&[u8]> {
-            let out = extra.get(at..at.checked_add(n)?)?;
-            at += n;
-            Some(out)
-        };
-        if take(1)?[0] != EXTRA_TAG_PARTS {
-            return None;
-        }
-        let prefix_len = u32::from_le_bytes(take(4)?.try_into().ok()?) as usize;
-        let prefix = take(prefix_len)?.to_vec();
-        let n_locations = u16::from_le_bytes(take(2)?.try_into().ok()?) as usize;
-        let mut table = Vec::with_capacity(n_locations);
-        for _ in 0..n_locations {
-            let len = u16::from_le_bytes(take(2)?.try_into().ok()?) as usize;
-            let url = std::str::from_utf8(take(len)?).ok()?.to_string();
-            table.push(VirtualChunkLocation::from_trusted(url));
-        }
-        let n = u32::from_le_bytes(take(4)?.try_into().ok()?) as usize;
-        let mut ranges = Vec::with_capacity(n.min(1 << 16));
-        for _ in 0..n {
-            let index = u16::from_le_bytes(take(2)?.try_into().ok()?) as usize;
-            let offset = u64::from_le_bytes(take(8)?.try_into().ok()?);
-            let length = u64::from_le_bytes(take(8)?.try_into().ok()?);
-            let location =
-                if index == 0 { None } else { Some(table.get(index - 1)?.clone()) };
-            ranges.push((location, offset, length));
-        }
-        Some((
-            (!prefix.is_empty()).then(|| Bytes::from(prefix)),
-            (!ranges.is_empty()).then_some(ranges),
-        ))
+/// The reference written by [`encode_parts`], without its checksum.
+pub(crate) fn decode_parts(extra: Option<&[u8]>) -> Option<VirtualChunkRef> {
+    let extra = extra?;
+    let mut at = 0usize;
+    let mut take = |n: usize| -> Option<&[u8]> {
+        let out = extra.get(at..at.checked_add(n)?)?;
+        at += n;
+        Some(out)
+    };
+    if take(1)?[0] != EXTRA_TAG_PARTS {
+        return None;
     }
-    extra.and_then(parse).unwrap_or((None, None))
+    let prefix_len = u32::from_le_bytes(take(4)?.try_into().ok()?) as usize;
+    let prefix = take(prefix_len)?.to_vec();
+    let n_locations = u16::from_le_bytes(take(2)?.try_into().ok()?) as usize;
+    let mut table = Vec::with_capacity(n_locations);
+    for _ in 0..n_locations {
+        let len = u16::from_le_bytes(take(2)?.try_into().ok()?) as usize;
+        let url = std::str::from_utf8(take(len)?).ok()?.to_string();
+        table.push(VirtualChunkLocation::from_trusted(url));
+    }
+    let n = u32::from_le_bytes(take(4)?.try_into().ok()?) as usize;
+    let mut ranges = Vec::with_capacity(n.min(1 << 16));
+    for _ in 0..n {
+        let index = u16::from_le_bytes(take(2)?.try_into().ok()?) as usize;
+        let offset = u64::from_le_bytes(take(8)?.try_into().ok()?);
+        let length = u64::from_le_bytes(take(8)?.try_into().ok()?);
+        ranges.push((table.get(index)?.clone(), offset, length));
+    }
+    let mut ranges = ranges.into_iter();
+    let (location, offset, length) = ranges.next()?;
+    let more: Vec<VirtualRange> = ranges
+        .map(|(l, o, n)| (if l == location { None } else { Some(l) }, o, n))
+        .collect();
+    Some(VirtualChunkRef {
+        location,
+        offset,
+        length,
+        checksum: None,
+        prefix: (!prefix.is_empty()).then(|| Bytes::from(prefix)),
+        more_ranges: (!more.is_empty()).then_some(more),
+    })
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -897,6 +903,12 @@ fn ref_to_payload(
     chunk_ref: generated::ChunkRef<'_>,
     decompressor: Option<&mut zstd::bulk::Decompressor<'static>>,
 ) -> Result<ChunkPayload, IcechunkFormatError> {
+    if let Some(reference) = decode_parts(chunk_ref.extra().map(|e| e.bytes())) {
+        return Ok(ChunkPayload::Virtual(VirtualChunkRef {
+            checksum: checksum(&chunk_ref),
+            ..reference
+        }));
+    }
     if let Some(chunk_id) = chunk_ref.chunk_id() {
         let id = ChunkId::new(chunk_id.0);
         Ok(ChunkPayload::Ref(ChunkRef {
@@ -923,23 +935,21 @@ fn ref_to_payload(
             .capture()?
             .to_owned();
         let location = VirtualChunkLocation::from_trusted(location_string);
-        let (prefix, more_ranges) = decode_parts(chunk_ref.extra().map(|e| e.bytes()));
         Ok(ChunkPayload::Virtual(VirtualChunkRef {
             location,
             checksum: checksum(&chunk_ref),
-            prefix,
-            more_ranges,
+            prefix: None,
+            more_ranges: None,
             offset: chunk_ref.offset(),
             length: chunk_ref.length(),
         }))
     } else if let Some(location) = chunk_ref.location() {
         let location = VirtualChunkLocation::from_trusted(location.to_string());
-        let (prefix, more_ranges) = decode_parts(chunk_ref.extra().map(|e| e.bytes()));
         Ok(ChunkPayload::Virtual(VirtualChunkRef {
             location,
             checksum: checksum(&chunk_ref),
-            prefix,
-            more_ranges,
+            prefix: None,
+            more_ranges: None,
             offset: chunk_ref.offset(),
             length: chunk_ref.length(),
         }))
@@ -1134,24 +1144,30 @@ fn mk_chunk_ref<'bldr>(
         }
         ChunkPayload::Virtual(virtual_chunk_ref) => {
             let location_str = virtual_chunk_ref.location.0.as_str();
-            let (location, compressed_location) =
-                if let Some(compressed) = precompressed_location {
-                    (None, Some(builder.create_vector(&compressed)))
-                } else {
-                    (Some(builder.create_string(location_str)), None)
-                };
-            let extra = encode_parts(
-                virtual_chunk_ref.prefix.as_ref(),
-                virtual_chunk_ref.more_ranges.as_ref(),
-            )
-            .map(|extra| builder.create_vector(extra.as_slice()));
+            // A reference with a prefix or further ranges goes whole into `extra`,
+            // with no location, so that older readers reject it.
+            let parts = encode_parts(&virtual_chunk_ref);
+            let total_length = virtual_chunk_ref.length
+                + virtual_chunk_ref.prefix.as_ref().map_or(0, |p| p.len() as u64)
+                + virtual_chunk_ref
+                    .more_ranges
+                    .as_ref()
+                    .map_or(0, |r| r.iter().map(|(_, _, l)| *l).sum::<u64>());
+            let extra = parts.as_ref().map(|extra| builder.create_vector(extra.as_slice()));
+            let (location, compressed_location) = if parts.is_some() {
+                (None, None)
+            } else if let Some(compressed) = precompressed_location {
+                (None, Some(builder.create_vector(&compressed)))
+            } else {
+                (Some(builder.create_string(location_str)), None)
+            };
             let args = generated::ChunkRefArgs {
                 index,
                 location,
                 compressed_location,
                 extra,
-                offset: virtual_chunk_ref.offset,
-                length: virtual_chunk_ref.length,
+                offset: if parts.is_some() { 0 } else { virtual_chunk_ref.offset },
+                length: if parts.is_some() { total_length } else { virtual_chunk_ref.length },
                 checksum_etag: match &virtual_chunk_ref.checksum {
                     Some(cs) => match cs {
                         Checksum::LastModified(_) => None,
@@ -1210,36 +1226,71 @@ pub(crate) fn root_options() -> &'static VerifierOptions {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_virtual_parts_roundtrip() {
+    fn multi_part_reference() -> VirtualChunkRef {
         let other = VirtualChunkLocation::from_trusted("s3://bucket/other.nc".to_string());
         let third = VirtualChunkLocation::from_trusted("s3://bucket/third.nc".to_string());
-        let prefix = Bytes::from_static(b"\x01\x02index");
-        let ranges: Vec<VirtualRange> = vec![
-            (None, 10, 20),
-            (Some(other.clone()), 0, 7),
-            (Some(third), u64::MAX - 5, 5),
-            (Some(other), 7, 1),
-        ];
-        // every combination of prefix and ranges survives
-        for (p, r) in [
-            (Some(&prefix), Some(&ranges)),
-            (Some(&prefix), None),
-            (None, Some(&ranges)),
-        ] {
-            let encoded = encode_parts(p, r).unwrap();
-            let (p2, r2) = decode_parts(Some(encoded.as_slice()));
-            assert_eq!(p2.as_ref(), p);
-            assert_eq!(r2.as_ref(), r);
+        VirtualChunkRef {
+            location: VirtualChunkLocation::from_trusted("s3://bucket/own.nc".to_string()),
+            offset: 10,
+            length: 20,
+            checksum: None,
+            prefix: Some(Bytes::from_static(b"\x01\x02index")),
+            more_ranges: Some(vec![
+                (None, 40, 2),
+                (Some(other.clone()), 0, 7),
+                (Some(third), u64::MAX - 5, 5),
+                (Some(other), 7, 1),
+            ]),
         }
-        assert_eq!(encode_parts(None, None), None);
+    }
+
+    #[test]
+    fn test_virtual_parts_roundtrip() {
+        let full = multi_part_reference();
+        let only_prefix = VirtualChunkRef { more_ranges: None, ..full.clone() };
+        let only_ranges = VirtualChunkRef { prefix: None, ..full.clone() };
+        for reference in [&full, &only_prefix, &only_ranges] {
+            let encoded = encode_parts(reference).unwrap();
+            assert_eq!(decode_parts(Some(encoded.as_slice())).as_ref(), Some(reference));
+        }
+        let plain = VirtualChunkRef { prefix: None, more_ranges: None, ..full.clone() };
+        assert_eq!(encode_parts(&plain), None);
         // absent, truncated or foreign bytes mean "no parts", never a panic
-        assert_eq!(decode_parts(None), (None, None));
-        let encoded = encode_parts(Some(&prefix), Some(&ranges)).unwrap();
+        assert_eq!(decode_parts(None), None);
+        let encoded = encode_parts(&full).unwrap();
         for cut in 0..encoded.len() {
-            assert_eq!(decode_parts(Some(&encoded[..cut])), (None, None));
+            assert_eq!(decode_parts(Some(&encoded[..cut])), None);
         }
-        assert_eq!(decode_parts(Some(b"\xff unrelated")), (None, None));
+        assert_eq!(decode_parts(Some(b"\xff unrelated")), None);
+    }
+
+    /// A multi-part reference survives a manifest, and is written so that a reader
+    /// that predates it cannot mistake it for a plain reference: it has no location.
+    #[tokio_test]
+    async fn test_multi_part_reference_in_a_manifest() -> Result<(), Box<dyn Error>> {
+        let mut chunks = make_virtual_chunks(3);
+        let node = chunks[0].node.clone();
+        chunks[1].payload = ChunkPayload::Virtual(multi_part_reference());
+        for config in [None, Some(&COMPRESS_CONFIG)] {
+            let manifest = Arc::new(
+                Manifest::from_iter(&ManifestId::random(), chunks.clone(), config)
+                    .await?
+                    .unwrap(),
+            );
+            let read: Vec<_> =
+                Arc::clone(&manifest).iter(node.clone())?.collect::<Result<_, _>>()?;
+            assert_eq!(read.len(), 3);
+            for ((_, payload), chunk) in read.iter().zip(chunks.iter()) {
+                assert_eq!(payload, &chunk.payload);
+            }
+            let raw = manifest.root().arrays().get(0).refs().get(1);
+            assert!(raw.extra().is_some());
+            assert!(raw.location().is_none());
+            assert!(raw.compressed_location().is_none());
+            assert!(raw.inline().is_none());
+            assert!(raw.chunk_id().is_none());
+        }
+        Ok(())
     }
     use crate::roundtrip_serialization_tests;
     use crate::strategies::{

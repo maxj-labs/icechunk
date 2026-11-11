@@ -1412,8 +1412,14 @@ impl Session {
                             resolver.fetch_chunk(
                                 l.as_ref().unwrap_or(&location).url(),
                                 source,
-                                // a checksum describes the reference's own object
-                                if l.is_none() { checksum.as_ref() } else { None },
+                                // An ETag describes the reference's own object. A
+                                // "not modified since" time holds for any object.
+                                match (&checksum, l) {
+                                    (Some(icechunk_format::manifest::Checksum::LastModified(_)), _) | (_, None) => {
+                                        checksum.as_ref()
+                                    }
+                                    _ => None,
+                                },
                                 RequestAttribution {
                                     labels: resolver.attribution_labels(),
                                     array: Some(&array),
@@ -1665,14 +1671,25 @@ impl Session {
             .payload
         {
             ChunkPayload::Virtual(reference) => {
-                let expanded = match resolver.expand_location(reference.location.url()) {
-                    Ok(abs) => abs,
-                    Err(e) => return ready(Err(e.inject())),
-                };
-                ready(Ok(Some(expanded)))
+                // the reference's own object, then any others its ranges are in
+                let mut locations = vec![reference.location.clone()];
+                for (location, _, _) in reference.more_ranges.iter().flatten() {
+                    if let Some(location) = location
+                        && !locations.contains(location)
+                    {
+                        locations.push(location.clone());
+                    }
+                }
+                let expanded = locations
+                    .iter()
+                    .map(|l| resolver.expand_location(l.url()).map_err(|e| e.inject()))
+                    .collect::<SessionResult<Vec<_>>>();
+                ready(expanded.map(Some))
             }
             _ => ready(Ok(None)),
         });
+        let stream =
+            stream.map_ok(|urls| stream::iter(urls.into_iter().map(Ok))).try_flatten();
         Ok(stream)
     }
 

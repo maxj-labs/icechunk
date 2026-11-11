@@ -1784,6 +1784,10 @@ async fn test_virtual_ref_with_prefix_and_ranges_of_two_objects()
         read(&ds, ByteRange::Bounded(6..14)).await?.as_deref(),
         Some(&whole[6..14])
     );
+    // both objects are listed as sources
+    let mut sources: Vec<String> = ds.all_virtual_chunk_locations().await?.try_collect().await?;
+    sources.sort();
+    assert_eq!(sources, vec![a.clone(), b.clone()]);
     drop(parent);
     Ok(())
 }
