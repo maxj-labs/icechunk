@@ -427,7 +427,12 @@ impl Store {
         let mut failed = Vec::new();
         for (index, reference) in references.into_iter() {
             if validate_container
-                && session.validate_virtual_chunk_location(&reference.location).is_err()
+                && (session.validate_virtual_chunk_location(&reference.location).is_err()
+                    || reference.more_ranges.iter().flatten().any(|(location, _, _)| {
+                        location.as_ref().is_some_and(|l| {
+                            session.validate_virtual_chunk_location(l).is_err()
+                        })
+                    }))
             {
                 failed.push(index);
             } else {
@@ -986,7 +991,7 @@ async fn get_chunk_size(
                     + virtual_chunk_ref
                         .more_ranges
                         .as_ref()
-                        .map_or(0, |r| r.iter().map(|(_, l)| *l).sum::<u64>())
+                        .map_or(0, |r| r.iter().map(|(_, _, l)| *l).sum::<u64>())
             }
             ChunkPayload::Ref(chunk_ref) => chunk_ref.length,
             _ => 0,
@@ -1222,7 +1227,16 @@ impl ArrayMetadata {
                 ).capture()?;
                 let num_chunks = values
                     .iter()
-                    .map(|v| {
+                    .zip(self.shape.iter())
+                    .map(|(v, extent)| {
+                        if let Some(size) = v.as_u64() {
+                            // a bare integer: a regular dimension, e.g. [[2, 3], 10]
+                            return Some(if size == 0 {
+                                0
+                            } else {
+                                (*extent).div_ceil(size) as u32
+                            });
+                        }
                         let v = v.as_array()?;
                         v.iter().try_fold(0u32, |acc, inner| {
                             if inner.is_number() {
@@ -1319,7 +1333,23 @@ impl ArrayMetadata {
                 ).capture()?;
                 let chunks = values
                     .iter()
-                    .map(|v| {
+                    .zip(self.shape.iter())
+                    .map(|(v, extent)| {
+                        if let Some(size) = v.as_u64() {
+                            // a bare integer: a regular dimension, whose last chunk
+                            // is cut at the array's edge
+                            if size == 0 {
+                                return Some(Vec::new());
+                            }
+                            let n = (*extent).div_ceil(size) as usize;
+                            let mut sizes = vec![size as u32; n];
+                            if let (Some(last), rem) = (sizes.last_mut(), *extent % size)
+                                && rem != 0
+                            {
+                                *last = rem as u32;
+                            }
+                            return Some(sizes);
+                        }
                         let v = v.as_array()?;
                         v.iter().try_fold(Vec::<u32>::new(), |mut acc, inner| {
                             if inner.is_number() {

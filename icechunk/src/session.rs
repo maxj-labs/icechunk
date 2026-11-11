@@ -1378,54 +1378,62 @@ impl Session {
                 more_ranges,
             })) if prefix.is_some() || more_ranges.is_some() => {
                 // The chunk is a concatenation: the prefix, then each referenced
-                // range in order. Read only the parts the requested range touches.
+                // range in order. Read only the parts the requested range touches,
+                // all at once.
                 let prefix = prefix.unwrap_or_default();
-                let mut ranges = vec![(offset, length)];
+                let mut ranges = vec![(None, offset, length)];
                 ranges.extend(more_ranges.unwrap_or_default());
                 let total =
-                    prefix.len() as u64 + ranges.iter().map(|(_, l)| *l).sum::<u64>();
+                    prefix.len() as u64 + ranges.iter().map(|(_, _, l)| *l).sum::<u64>();
                 let wanted = construct_valid_byte_range(byte_range, 0, total)?;
                 let resolver = Arc::clone(&self.virtual_resolver);
                 let array = array_label(path).to_string();
                 let chunk = coords.0.clone();
                 Ok(Some(crate::compat::ic_boxed!(async move {
-                    let mut whole = bytes::BytesMut::with_capacity(
-                        (wanted.end - wanted.start) as usize,
-                    );
                     let prefix_len = prefix.len() as u64;
-                    if wanted.start < prefix_len {
-                        let stop = wanted.end.min(prefix_len);
-                        whole.extend_from_slice(
-                            &prefix[wanted.start as usize..stop as usize],
-                        );
-                    }
+                    let mut needed = Vec::new();
                     let mut part_start = prefix_len;
-                    for (part_offset, part_length) in ranges {
+                    for (part_location, part_offset, part_length) in ranges {
                         let part_end = part_start + part_length;
                         let lo = wanted.start.max(part_start);
                         let hi = wanted.end.min(part_end);
                         if lo < hi {
                             let source = part_offset + (lo - part_start)
                                 ..part_offset + (hi - part_start);
-                            let fetched = resolver
-                                .fetch_chunk(
-                                    location.url(),
-                                    &source,
-                                    checksum.as_ref(),
-                                    RequestAttribution {
-                                        labels: resolver.attribution_labels(),
-                                        array: Some(&array),
-                                        chunk: Some(&chunk),
-                                    },
-                                )
-                                .await
-                                .inject()?;
-                            whole.extend_from_slice(&fetched);
+                            needed.push((part_location, source));
                         }
                         part_start = part_end;
                         if part_start >= wanted.end {
                             break;
                         }
+                    }
+                    let fetched =
+                        futures::future::try_join_all(needed.iter().map(|(l, source)| {
+                            resolver.fetch_chunk(
+                                l.as_ref().unwrap_or(&location).url(),
+                                source,
+                                // a checksum describes the reference's own object
+                                if l.is_none() { checksum.as_ref() } else { None },
+                                RequestAttribution {
+                                    labels: resolver.attribution_labels(),
+                                    array: Some(&array),
+                                    chunk: Some(&chunk),
+                                },
+                            )
+                        }))
+                        .await
+                        .inject()?;
+                    let mut whole = bytes::BytesMut::with_capacity(
+                        (wanted.end - wanted.start) as usize,
+                    );
+                    if wanted.start < prefix_len {
+                        let stop = wanted.end.min(prefix_len);
+                        whole.extend_from_slice(
+                            &prefix[wanted.start as usize..stop as usize],
+                        );
+                    }
+                    for part in fetched {
+                        whole.extend_from_slice(&part);
                     }
                     Ok(whole.freeze())
                 })))

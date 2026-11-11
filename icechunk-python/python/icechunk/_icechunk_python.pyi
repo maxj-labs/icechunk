@@ -387,7 +387,7 @@ class VirtualChunkSpec:
         etag_checksum: str | None = None,
         last_updated_at_checksum: datetime.datetime | None = None,
         prefix: bytes | None = None,
-        more_ranges: list[tuple[int, int]] | None = None,
+        more_ranges: list[tuple[str | None, int, int]] | None = None,
     ) -> Self: ...
 
 class CompressionAlgorithm(Enum):

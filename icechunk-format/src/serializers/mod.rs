@@ -226,6 +226,8 @@ mod tests {
             offset: i as u64,
             length: 42,
             checksum: None,
+            prefix: None,
+            more_ranges: None,
         })
     }
 

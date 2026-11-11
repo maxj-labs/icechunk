@@ -207,7 +207,7 @@ prop_compose! {
         offset in any::<u64>(),
         length in any::<u64>(),
        checksum in option::of(checksum())) -> VirtualChunkRef {
-        VirtualChunkRef{ location, offset, length, checksum }
+        VirtualChunkRef{ location, offset, length, checksum, prefix: None, more_ranges: None }
     }
 }
 

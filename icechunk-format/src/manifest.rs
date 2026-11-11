@@ -451,68 +451,109 @@ pub struct VirtualChunkRef {
     /// Stored in `ChunkRef.extra`.
     #[serde(default)]
     pub prefix: Option<Bytes>,
-    /// Further byte ranges `(offset, length)` of the same object, read in order
-    /// after `(offset, length)`. With `prefix`, they make the chunk a
+    /// Further byte ranges, of this object or of others, read in order after
+    /// `(offset, length)`. With `prefix`, they make the chunk a
     /// concatenation: a literal, then several ranges (a "virtual shard").
     /// Stored in `ChunkRef.extra`.
     #[serde(default)]
-    pub more_ranges: Option<Vec<(ChunkOffset, ChunkLength)>>,
+    pub more_ranges: Option<Vec<VirtualRange>>,
 }
 
-/// `ChunkRef.extra` of a virtual reference: a tag byte, the prefix length (u32 LE)
-/// and bytes, then the number of further ranges (u32 LE) and each as two u64 LE.
-const EXTRA_TAG_PARTS: u8 = 1;
+/// One further byte range of a virtual reference: the object it is in (`None`
+/// for the reference's own `location`), its offset and its length.
+pub type VirtualRange = (Option<VirtualChunkLocation>, ChunkOffset, ChunkLength);
 
-fn encode_parts(
+/// `ChunkRef.extra` of a virtual reference with a prefix or further ranges:
+///
+/// - a tag byte (2);
+/// - the prefix: its length (u32 LE) and bytes;
+/// - a table of the other objects the ranges are in: a count (u16 LE), then each
+///   URL as a length (u16 LE) and UTF-8 bytes;
+/// - the further ranges: a count (u32 LE), then each as an index into the table
+///   plus one (u16 LE; 0 is the reference's own location), an offset and a
+///   length (u64 LE each).
+const EXTRA_TAG_PARTS: u8 = 2;
+
+pub(crate) fn encode_parts(
     prefix: Option<&Bytes>,
-    more_ranges: Option<&Vec<(ChunkOffset, ChunkLength)>>,
+    more_ranges: Option<&Vec<VirtualRange>>,
 ) -> Option<Vec<u8>> {
     if prefix.is_none() && more_ranges.is_none() {
         return None;
     }
     let prefix = prefix.map(|p| p.as_ref()).unwrap_or(&[]);
     let ranges = more_ranges.map(|r| r.as_slice()).unwrap_or(&[]);
-    let mut out = Vec::with_capacity(9 + prefix.len() + 16 * ranges.len());
+    let mut table: Vec<&str> = Vec::new();
+    for (location, _, _) in ranges {
+        if let Some(location) = location
+            && !table.contains(&location.url())
+        {
+            table.push(location.url());
+        }
+    }
+    let mut out = Vec::with_capacity(11 + prefix.len() + 18 * ranges.len());
     out.push(EXTRA_TAG_PARTS);
     out.extend_from_slice(&(prefix.len() as u32).to_le_bytes());
     out.extend_from_slice(prefix);
+    out.extend_from_slice(&(table.len() as u16).to_le_bytes());
+    for url in &table {
+        out.extend_from_slice(&(url.len() as u16).to_le_bytes());
+        out.extend_from_slice(url.as_bytes());
+    }
     out.extend_from_slice(&(ranges.len() as u32).to_le_bytes());
-    for (offset, length) in ranges {
+    for (location, offset, length) in ranges {
+        let index = match location {
+            None => 0u16,
+            Some(location) => {
+                table.iter().position(|url| *url == location.url()).unwrap_or(0) as u16
+                    + 1
+            }
+        };
+        out.extend_from_slice(&index.to_le_bytes());
         out.extend_from_slice(&offset.to_le_bytes());
         out.extend_from_slice(&length.to_le_bytes());
     }
     Some(out)
 }
 
-#[allow(clippy::type_complexity)]
-fn decode_parts(
+pub(crate) fn decode_parts(
     extra: Option<&[u8]>,
-) -> (Option<Bytes>, Option<Vec<(ChunkOffset, ChunkLength)>>) {
-    let Some(extra) = extra else { return (None, None) };
-    if extra.len() < 9 || extra[0] != EXTRA_TAG_PARTS {
-        return (None, None);
+) -> (Option<Bytes>, Option<Vec<VirtualRange>>) {
+    fn parse(extra: &[u8]) -> Option<(Option<Bytes>, Option<Vec<VirtualRange>>)> {
+        let mut at = 0usize;
+        let mut take = |n: usize| -> Option<&[u8]> {
+            let out = extra.get(at..at.checked_add(n)?)?;
+            at += n;
+            Some(out)
+        };
+        if take(1)?[0] != EXTRA_TAG_PARTS {
+            return None;
+        }
+        let prefix_len = u32::from_le_bytes(take(4)?.try_into().ok()?) as usize;
+        let prefix = take(prefix_len)?.to_vec();
+        let n_locations = u16::from_le_bytes(take(2)?.try_into().ok()?) as usize;
+        let mut table = Vec::with_capacity(n_locations);
+        for _ in 0..n_locations {
+            let len = u16::from_le_bytes(take(2)?.try_into().ok()?) as usize;
+            let url = std::str::from_utf8(take(len)?).ok()?.to_string();
+            table.push(VirtualChunkLocation::from_trusted(url));
+        }
+        let n = u32::from_le_bytes(take(4)?.try_into().ok()?) as usize;
+        let mut ranges = Vec::with_capacity(n.min(1 << 16));
+        for _ in 0..n {
+            let index = u16::from_le_bytes(take(2)?.try_into().ok()?) as usize;
+            let offset = u64::from_le_bytes(take(8)?.try_into().ok()?);
+            let length = u64::from_le_bytes(take(8)?.try_into().ok()?);
+            let location =
+                if index == 0 { None } else { Some(table.get(index - 1)?.clone()) };
+            ranges.push((location, offset, length));
+        }
+        Some((
+            (!prefix.is_empty()).then(|| Bytes::from(prefix)),
+            (!ranges.is_empty()).then_some(ranges),
+        ))
     }
-    let u32_at = |i: usize| {
-        extra.get(i..i + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize)
-    };
-    let Some(prefix_len) = u32_at(1) else { return (None, None) };
-    let Some(prefix) = extra.get(5..5 + prefix_len) else { return (None, None) };
-    let Some(n) = u32_at(5 + prefix_len) else { return (None, None) };
-    let mut ranges = Vec::with_capacity(n);
-    let mut at = 9 + prefix_len;
-    for _ in 0..n {
-        let Some(b) = extra.get(at..at + 16) else { return (None, None) };
-        let mut o = [0u8; 8];
-        let mut l = [0u8; 8];
-        o.copy_from_slice(&b[..8]);
-        l.copy_from_slice(&b[8..]);
-        ranges.push((u64::from_le_bytes(o), u64::from_le_bytes(l)));
-        at += 16;
-    }
-    (
-        (prefix_len > 0).then(|| Bytes::copy_from_slice(prefix)),
-        (n > 0).then_some(ranges),
-    )
+    extra.and_then(parse).unwrap_or((None, None))
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1168,6 +1209,38 @@ pub(crate) fn root_options() -> &'static VerifierOptions {
 #[expect(unused_qualifications)] // proptest macros generate fully qualified paths
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_virtual_parts_roundtrip() {
+        let other = VirtualChunkLocation::from_trusted("s3://bucket/other.nc".to_string());
+        let third = VirtualChunkLocation::from_trusted("s3://bucket/third.nc".to_string());
+        let prefix = Bytes::from_static(b"\x01\x02index");
+        let ranges: Vec<VirtualRange> = vec![
+            (None, 10, 20),
+            (Some(other.clone()), 0, 7),
+            (Some(third), u64::MAX - 5, 5),
+            (Some(other), 7, 1),
+        ];
+        // every combination of prefix and ranges survives
+        for (p, r) in [
+            (Some(&prefix), Some(&ranges)),
+            (Some(&prefix), None),
+            (None, Some(&ranges)),
+        ] {
+            let encoded = encode_parts(p, r).unwrap();
+            let (p2, r2) = decode_parts(Some(encoded.as_slice()));
+            assert_eq!(p2.as_ref(), p);
+            assert_eq!(r2.as_ref(), r);
+        }
+        assert_eq!(encode_parts(None, None), None);
+        // absent, truncated or foreign bytes mean "no parts", never a panic
+        assert_eq!(decode_parts(None), (None, None));
+        let encoded = encode_parts(Some(&prefix), Some(&ranges)).unwrap();
+        for cut in 0..encoded.len() {
+            assert_eq!(decode_parts(Some(&encoded[..cut])), (None, None));
+        }
+        assert_eq!(decode_parts(Some(b"\xff unrelated")), (None, None));
+    }
     use crate::roundtrip_serialization_tests;
     use crate::strategies::{
         ShapeDim, limited_width_manifest_extents, manifest_extents, manifest_ref,

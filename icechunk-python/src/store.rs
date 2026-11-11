@@ -88,7 +88,7 @@ pub(crate) struct VirtualChunkSpec {
     #[pyo3(get)]
     prefix: Option<Vec<u8>>,
     #[pyo3(get)]
-    more_ranges: Option<Vec<(ChunkOffset, ChunkLength)>>,
+    more_ranges: Option<Vec<(Option<String>, ChunkOffset, ChunkLength)>>,
 }
 
 impl VirtualChunkSpec {
@@ -115,7 +115,7 @@ impl VirtualChunkSpec {
         etag_checksum: Option<String>,
         last_updated_at_checksum: Option<chrono::DateTime<Utc>>,
         prefix: Option<Vec<u8>>,
-        more_ranges: Option<Vec<(ChunkOffset, ChunkLength)>>,
+        more_ranges: Option<Vec<(Option<String>, ChunkOffset, ChunkLength)>>,
     ) -> Self {
         Self {
             index,
@@ -464,7 +464,20 @@ impl PyStore {
                             location,
                             checksum,
                             prefix: vcs.prefix.map(Bytes::from),
-                            more_ranges: vcs.more_ranges,
+                            more_ranges: vcs
+                                .more_ranges
+                                .map(|ranges| {
+                                    ranges
+                                        .into_iter()
+                                        .map(|(location, offset, length)| {
+                                            let location = location
+                                                .map(|l| VirtualChunkLocation::from_url(&l))
+                                                .transpose()?;
+                                            Ok((location, offset, length))
+                                        })
+                                        .collect::<Result<Vec<_>, PyIcechunkStoreError>>()
+                                })
+                                .transpose()?,
                         };
                         Ok::<_, PyIcechunkStoreError>((index, vref))
                     })
@@ -518,7 +531,20 @@ impl PyStore {
                             location,
                             checksum,
                             prefix: vcs.prefix.map(Bytes::from),
-                            more_ranges: vcs.more_ranges,
+                            more_ranges: vcs
+                                .more_ranges
+                                .map(|ranges| {
+                                    ranges
+                                        .into_iter()
+                                        .map(|(location, offset, length)| {
+                                            let location = location
+                                                .map(|l| VirtualChunkLocation::from_url(&l))
+                                                .transpose()?;
+                                            Ok((location, offset, length))
+                                        })
+                                        .collect::<Result<Vec<_>, PyIcechunkStoreError>>()
+                                })
+                                .transpose()?,
                         };
                         Ok::<_, PyIcechunkStoreError>((index, vref))
                     })

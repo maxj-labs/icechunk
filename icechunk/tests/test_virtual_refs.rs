@@ -991,6 +991,8 @@ async fn test_zarr_store_virtual_refs_azure_set_and_get(
         offset: 0,
         length: 5,
         checksum: None,
+        prefix: None,
+        more_ranges: None,
     };
     let ref2 = VirtualChunkRef {
         location: VirtualChunkLocation::from_url(&format!(
@@ -1000,6 +1002,8 @@ async fn test_zarr_store_virtual_refs_azure_set_and_get(
         offset: 1,
         length: 5,
         checksum: None,
+        prefix: None,
+        more_ranges: None,
     };
     store.set_virtual_ref("array/c/0/0/0", ref1, false).await?;
     store.set_virtual_ref("array/c/0/0/1", ref2, false).await?;
@@ -1716,5 +1720,70 @@ async fn test_vcc_relative_ref_rejects_file_traversal() -> Result<(), Box<dyn Er
         ),
         "vcc://->file traversal must be rejected with NoContainerForUrl, got: {read:?}"
     );
+    Ok(())
+}
+
+// A reference made of a literal prefix and ranges of two objects reads as their
+// concatenation, whole and by byte range, and only through authorized containers.
+#[tokio_test]
+async fn test_virtual_ref_with_prefix_and_ranges_of_two_objects()
+-> Result<(), Box<dyn Error>> {
+    let (repo, allowed, _legit, _secret, parent, _repo_dir) =
+        setup_file_traversal_repo().await;
+    std::fs::write(allowed.join("a.bin"), b"0123456789abcdefghij").unwrap();
+    std::fs::write(allowed.join("b.bin"), b"KLMNOPQRST").unwrap();
+    let a = format!("file://{}/a.bin", allowed.to_str().unwrap());
+    let b = format!("file://{}/b.bin", allowed.to_str().unwrap());
+
+    let mut ds = repo.writable_session("main").await?;
+    let path: Path = "/joined".try_into().unwrap();
+    ds.add_array(path.clone(), ArrayShape::new(vec![(1, 1)]).unwrap(), None, Bytes::new())
+        .await?;
+    ds.set_chunk_ref(
+        path.clone(),
+        ChunkIndices(vec![0]),
+        Some(ChunkPayload::Virtual(VirtualChunkRef {
+            location: VirtualChunkLocation::from_url(&a)?,
+            offset: 2,
+            length: 4, // "2345"
+            checksum: None,
+            prefix: Some(Bytes::from_static(b"HDR")),
+            more_ranges: Some(vec![
+                (None, 10, 3),                                         // "abc"
+                (Some(VirtualChunkLocation::from_url(&b)?), 0, 4),     // "KLMN"
+                (None, 17, 3),                                         // "hij"
+            ]),
+        })),
+    )
+    .await?;
+    let whole: &[u8] = b"HDR2345abcKLMNhij";
+    async fn read(
+        ds: &icechunk::session::Session,
+        range: ByteRange,
+    ) -> Result<Option<Bytes>, Box<dyn Error>> {
+        let path: Path = "/joined".try_into().unwrap();
+        let reader = ds.get_chunk_reader(&path, &ChunkIndices(vec![0]), &range).await?;
+        Ok(get_chunk(reader).await?)
+    }
+    assert_eq!(read(&ds, ByteRange::ALL).await?.as_deref(), Some(whole));
+    // ranges that fall inside one part, span several, and start in the prefix
+    for (lo, hi) in [(0u64, 3u64), (1, 5), (3, 7), (5, 12), (9, 15), (14, 17), (0, 17)] {
+        let got = read(&ds, ByteRange::Bounded(lo..hi)).await?;
+        assert_eq!(got.as_deref(), Some(&whole[lo as usize..hi as usize]), "{lo}..{hi}");
+    }
+    assert_eq!(read(&ds, ByteRange::From(11)).await?.as_deref(), Some(&whole[11..]));
+    assert_eq!(read(&ds, ByteRange::Last(5)).await?.as_deref(), Some(&whole[12..]));
+
+    // the reference survives a commit (it is written to and read from a manifest)
+    ds.commit("joined").max_concurrent_nodes(8).execute().await?;
+    let ds = repo
+        .readonly_session(&icechunk::repository::VersionInfo::BranchTipRef("main".into()))
+        .await?;
+    assert_eq!(read(&ds, ByteRange::ALL).await?.as_deref(), Some(whole));
+    assert_eq!(
+        read(&ds, ByteRange::Bounded(6..14)).await?.as_deref(),
+        Some(&whole[6..14])
+    );
+    drop(parent);
     Ok(())
 }
