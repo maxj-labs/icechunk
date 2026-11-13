@@ -944,14 +944,59 @@ async fn get_metadata(
     Ok(range.slice(&node.user_data))
 }
 
-/// Arrays whose metadata contains this text get every chunk's grid index put in front
-/// of the chunk's bytes when it is read. It is how a codec that must know which chunk
-/// it is decoding can learn that from the chunk itself.
+/// The value of `codecs[0].configuration.select` that makes the store put every
+/// chunk's grid index in front of the chunk's bytes when it is read. It is how a codec
+/// that must know which chunk it is decoding can learn that from the chunk itself.
 ///
 /// This is a prototype of "the store prepends chunk index info on read"
-/// (zarr-specs#399, design 2.1). The marker is a codec option's value; a real design
-/// would use a proper flag.
-const CHUNK_INDEX_PREFIX_MARKER: &[u8] = b"\"index_prefix\"";
+/// (zarr-specs#399, design 2.1). Reading the request out of a codec's configuration is
+/// a stand-in: a real design would give the array a flag of its own.
+const CHUNK_INDEX_PREFIX_SELECT: &str = "index_prefix";
+
+/// Whether an array's metadata asks for its chunks to be read with their index in
+/// front. The answer is remembered per metadata document, so a chunk read costs a hash
+/// of the document and not a parse of it.
+fn asks_for_chunk_index(user_data: &Bytes) -> bool {
+    use std::collections::HashMap;
+    use std::hash::{DefaultHasher, Hash as _, Hasher as _};
+    use std::sync::{LazyLock, Mutex};
+
+    static ANSWERS: LazyLock<Mutex<HashMap<u64, bool>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    // most arrays never mention it: skip the hash and the parse
+    let needle = CHUNK_INDEX_PREFIX_SELECT.as_bytes();
+    if !user_data.windows(needle.len()).any(|w| w == needle) {
+        return false;
+    }
+    let mut hasher = DefaultHasher::new();
+    user_data.hash(&mut hasher);
+    let key = hasher.finish();
+    if let Ok(answers) = ANSWERS.lock()
+        && let Some(answer) = answers.get(&key)
+    {
+        return *answer;
+    }
+    let answer = serde_json::from_slice::<serde_json::Value>(user_data)
+        .ok()
+        .and_then(|meta| {
+            meta.get("codecs")?
+                .as_array()?
+                .first()?
+                .get("configuration")?
+                .get("select")?
+                .as_str()
+                .map(|select| select == CHUNK_INDEX_PREFIX_SELECT)
+        })
+        .unwrap_or(false);
+    if let Ok(mut answers) = ANSWERS.lock() {
+        if answers.len() >= 1024 {
+            answers.clear();
+        }
+        answers.insert(key, answer);
+    }
+    answer
+}
 
 /// The header a chunk of this array is read with, if the array asks for one: its grid
 /// index as one little-endian u64 per axis. Nothing is stored for it.
@@ -965,11 +1010,7 @@ async fn chunk_index_header(
         // the chunk read that follows reports a missing array in its own words
         Err(_) => return Ok(None),
     };
-    let marked = node
-        .user_data
-        .windows(CHUNK_INDEX_PREFIX_MARKER.len())
-        .any(|w| w == CHUNK_INDEX_PREFIX_MARKER);
-    if !marked {
+    if !asks_for_chunk_index(&node.user_data) {
         return Ok(None);
     }
     let mut header = Vec::with_capacity(8 * coords.0.len());
@@ -2159,9 +2200,14 @@ mod tests {
         };
         store.set("asks/zarr.json", meta("index_prefix")).await?;
         store.set("plain/zarr.json", meta("key")).await?;
+        // the words alone, somewhere else in the metadata, ask for nothing
+        let mentions = Bytes::copy_from_slice(br#"{"zarr_format":3,"node_type":"array","attributes":{"note":"not index_prefix"},"shape":[4,300],"data_type":"int32","chunk_grid":{"name":"regular","configuration":{"chunk_shape":[1,1]}},"chunk_key_encoding":{"name":"default","configuration":{"separator":"/"}},"fill_value":0,"codecs":[{"name":"mycodec","configuration":{"select":"key"}}]}"#);
+        store.set("mentions/zarr.json", mentions).await?;
         let data = Bytes::copy_from_slice(b"hello world");
         store.set("asks/c/3/258", data.clone()).await?;
         store.set("plain/c/3/258", data.clone()).await?;
+        store.set("mentions/c/3/258", data.clone()).await?;
+        assert_eq!(store.get("mentions/c/3/258", &ByteRange::ALL).await?, data);
 
         // an array that does not ask is read as it is stored
         assert_eq!(store.get("plain/c/3/258", &ByteRange::ALL).await?, data);
