@@ -1737,13 +1737,8 @@ async fn test_virtual_ref_with_prefix_and_ranges_of_two_objects()
 
     let mut ds = repo.writable_session("main").await?;
     let path: Path = "/joined".try_into().unwrap();
-    ds.add_array(
-        path.clone(),
-        ArrayShape::new(vec![(1, 1)]).unwrap(),
-        None,
-        Bytes::new(),
-    )
-    .await?;
+    ds.add_array(path.clone(), ArrayShape::new(vec![(1, 1)]).unwrap(), None, Bytes::new())
+        .await?;
     ds.set_chunk_ref(
         path.clone(),
         ChunkIndices(vec![0]),
@@ -1754,9 +1749,9 @@ async fn test_virtual_ref_with_prefix_and_ranges_of_two_objects()
             checksum: None,
             prefix: Some(Bytes::from_static(b"HDR")),
             more_ranges: Some(vec![
-                (None, 10, 3),                                     // "abc"
-                (Some(VirtualChunkLocation::from_url(&b)?), 0, 4), // "KLMN"
-                (None, 17, 3),                                     // "hij"
+                (None, 10, 3),                                         // "abc"
+                (Some(VirtualChunkLocation::from_url(&b)?), 0, 4),     // "KLMN"
+                (None, 17, 3),                                         // "hij"
             ]),
         })),
     )
@@ -1790,8 +1785,7 @@ async fn test_virtual_ref_with_prefix_and_ranges_of_two_objects()
         Some(&whole[6..14])
     );
     // both objects are listed as sources
-    let mut sources: Vec<String> =
-        ds.all_virtual_chunk_locations().await?.try_collect().await?;
+    let mut sources: Vec<String> = ds.all_virtual_chunk_locations().await?.try_collect().await?;
     sources.sort();
     assert_eq!(sources, vec![a.clone(), b.clone()]);
     drop(parent);

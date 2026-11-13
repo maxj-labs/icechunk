@@ -944,99 +944,7 @@ async fn get_metadata(
     Ok(range.slice(&node.user_data))
 }
 
-/// Arrays whose metadata contains this text get every chunk's grid index put in front
-/// of the chunk's bytes when it is read. It is how a codec that must know which chunk
-/// it is decoding can learn that from the chunk itself.
-///
-/// This is a prototype of "the store prepends chunk index info on read"
-/// (zarr-specs#399, design 2.1). The marker is a codec option's value; a real design
-/// would use a proper flag.
-const CHUNK_INDEX_PREFIX_MARKER: &[u8] = b"\"index_prefix\"";
-
-/// The header a chunk of this array is read with, if the array asks for one: its grid
-/// index as one little-endian u64 per axis. Nothing is stored for it.
-async fn chunk_index_header(
-    path: &Path,
-    coords: &ChunkIndices,
-    session: &Session,
-) -> StoreResult<Option<Bytes>> {
-    let node = match session.get_node(path).await {
-        Ok(node) => node,
-        // the chunk read that follows reports a missing array in its own words
-        Err(_) => return Ok(None),
-    };
-    let marked = node
-        .user_data
-        .windows(CHUNK_INDEX_PREFIX_MARKER.len())
-        .any(|w| w == CHUNK_INDEX_PREFIX_MARKER);
-    if !marked {
-        return Ok(None);
-    }
-    let mut header = Vec::with_capacity(8 * coords.0.len());
-    for c in &coords.0 {
-        header.extend_from_slice(&(*c as u64).to_le_bytes());
-    }
-    Ok(Some(Bytes::from(header)))
-}
-
-/// A chunk read as its index header followed by its stored bytes. Byte ranges count
-/// from the start of the header. A chunk that is not stored reads as its header alone.
-async fn get_chunk_bytes_after_header(
-    key: &str,
-    path: Path,
-    coords: ChunkIndices,
-    byte_range: &ByteRange,
-    header: Bytes,
-    session: &Session,
-) -> StoreResult<Bytes> {
-    let h = header.len() as u64;
-    let stored = get_stored_chunk_size(&path, &coords, session).await?;
-    let total = h + stored;
-    let (start, end) = match byte_range {
-        ByteRange::Bounded(r) => (r.start.min(total), r.end.min(total)),
-        ByteRange::From(offset) => ((*offset).min(total), total),
-        ByteRange::Last(n) => (total.saturating_sub(*n), total),
-        ByteRange::Until(n) => (0, total.saturating_sub(*n)),
-    };
-    let from_header = header.slice(start.min(h) as usize..end.min(h) as usize);
-    let (body_start, body_end) = (start.saturating_sub(h), end.saturating_sub(h));
-    if body_end <= body_start {
-        return Ok(from_header);
-    }
-    let body = get_stored_chunk_bytes(
-        key,
-        path,
-        coords,
-        &ByteRange::bounded(body_start, body_end),
-        session,
-    )
-    .await?;
-    if from_header.is_empty() {
-        return Ok(body);
-    }
-    let mut out = Vec::with_capacity(from_header.len() + body.len());
-    out.extend_from_slice(&from_header);
-    out.extend_from_slice(&body);
-    Ok(Bytes::from(out))
-}
-
 async fn get_chunk_bytes(
-    key: &str,
-    path: Path,
-    coords: ChunkIndices,
-    byte_range: &ByteRange,
-    session: &Session,
-) -> StoreResult<Bytes> {
-    match chunk_index_header(&path, &coords, session).await? {
-        Some(header) => {
-            get_chunk_bytes_after_header(key, path, coords, byte_range, header, session)
-                .await
-        }
-        None => get_stored_chunk_bytes(key, path, coords, byte_range, session).await,
-    }
-}
-
-async fn get_stored_chunk_bytes(
     key: &str,
     path: Path,
     coords: ChunkIndices,
@@ -1069,16 +977,6 @@ async fn get_metadata_size(
 
 async fn get_chunk_size(
     _key: &str,
-    path: &Path,
-    coords: &ChunkIndices,
-    session: &Session,
-) -> StoreResult<u64> {
-    let header = chunk_index_header(path, coords, session).await?;
-    let stored = get_stored_chunk_size(path, coords, session).await?;
-    Ok(stored + header.map_or(0, |h| h.len() as u64))
-}
-
-async fn get_stored_chunk_size(
     path: &Path,
     coords: &ChunkIndices,
     session: &Session,
@@ -2137,65 +2035,6 @@ mod tests {
         ));
         store.set("array/zarr.json", Bytes::copy_from_slice(group_data)).await.unwrap();
 
-        Ok(())
-    }
-
-    #[tokio_test]
-    async fn test_chunk_index_is_prepended_for_arrays_that_ask()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let repo = create_memory_store_repository().await;
-        let ds = Arc::new(RwLock::new(repo.writable_session("main").await?));
-        let store = Store::from_session(Arc::clone(&ds)).await;
-        store
-            .set(
-                "zarr.json",
-                Bytes::copy_from_slice(br#"{"zarr_format":3, "node_type":"group"}"#),
-            )
-            .await?;
-        let meta = |select: &str| {
-            Bytes::from(format!(
-                r#"{{"zarr_format":3,"node_type":"array","attributes":{{}},"shape":[4,300],"data_type":"int32","chunk_grid":{{"name":"regular","configuration":{{"chunk_shape":[1,1]}}}},"chunk_key_encoding":{{"name":"default","configuration":{{"separator":"/"}}}},"fill_value":0,"codecs":[{{"name":"switch_x","configuration":{{"select":"{select}"}}}}]}}"#
-            ))
-        };
-        store.set("asks/zarr.json", meta("index_prefix")).await?;
-        store.set("plain/zarr.json", meta("key")).await?;
-        let data = Bytes::copy_from_slice(b"hello world");
-        store.set("asks/c/3/258", data.clone()).await?;
-        store.set("plain/c/3/258", data.clone()).await?;
-
-        // an array that does not ask is read as it is stored
-        assert_eq!(store.get("plain/c/3/258", &ByteRange::ALL).await?, data);
-        assert_eq!(store.getsize("plain/c/3/258").await?, 11);
-
-        let mut header = Vec::new();
-        header.extend_from_slice(&3u64.to_le_bytes());
-        header.extend_from_slice(&258u64.to_le_bytes());
-        let mut whole = header.clone();
-        whole.extend_from_slice(&data);
-        let key = "asks/c/3/258";
-        assert_eq!(store.get(key, &ByteRange::ALL).await?, whole);
-        assert_eq!(store.getsize(key).await?, 27);
-        // ranges count from the start of the header
-        assert_eq!(store.get(key, &ByteRange::bounded(0, 16)).await?, header);
-        assert_eq!(store.get(key, &ByteRange::bounded(8, 10)).await?, whole[8..10]);
-        assert_eq!(store.get(key, &ByteRange::bounded(12, 20)).await?, whole[12..20]);
-        assert_eq!(store.get(key, &ByteRange::bounded(16, 21)).await?, whole[16..21]);
-        assert_eq!(store.get(key, &ByteRange::from_offset(16)).await?, data);
-        assert_eq!(store.get(key, &ByteRange::from_offset(20)).await?, whole[20..]);
-        assert_eq!(store.get(key, &ByteRange::Last(5)).await?, whole[22..]);
-        assert_eq!(store.get(key, &ByteRange::Last(20)).await?, whole[7..]);
-        assert_eq!(store.get(key, &ByteRange::Until(11)).await?, header);
-
-        // a chunk that is not stored reads as its index alone
-        let mut absent = Vec::new();
-        absent.extend_from_slice(&0u64.to_le_bytes());
-        absent.extend_from_slice(&1u64.to_le_bytes());
-        assert_eq!(store.get("asks/c/0/1", &ByteRange::ALL).await?, absent);
-        assert_eq!(
-            store.get("asks/c/0/1", &ByteRange::from_offset(16)).await?,
-            Bytes::new()
-        );
-        assert!(store.get("plain/c/0/1", &ByteRange::ALL).await.is_err());
         Ok(())
     }
 
